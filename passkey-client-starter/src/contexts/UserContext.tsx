@@ -1,9 +1,9 @@
 // UserContext.tsx
-import { usePasskey, useUser } from '@/hooks/apiHooks';
-import { AuthContextType } from '@/types/LocalTypes';
-import { UserWithNoPassword } from '@sharedTypes/DBTypes';
-import React, { createContext, useCallback, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { usePasskey, useUser } from "@/hooks/apiHooks";
+import { AuthContextType } from "@/types/LocalTypes";
+import { UserWithNoPassword } from "@sharedTypes/DBTypes";
+import React, { createContext, useCallback, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 const UserContext = createContext<AuthContextType | null>(null);
 
@@ -21,27 +21,25 @@ const UserProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       const loginResult = await postLogin(email);
       if (loginResult) {
-        localStorage.setItem('token', loginResult.token);
+        localStorage.setItem("token", loginResult.token);
         setUser(loginResult.user);
-        navigate('/secret');
+        navigate("/secret");
       }
     } catch (e) {
       alert((e as Error).message);
     }
   };
 
-  const handleRegister = async (user: UserWithNoPassword) => {
-    // TODO implement register function
-  };
+  const handleRegister = async (user: UserWithNoPassword) => {};
 
   const handleLogout = useCallback(() => {
     try {
       // remove token from local storage
-      localStorage.removeItem('token');
+      localStorage.removeItem("token");
       // set user to null
       setUser(null);
       // navigate to home
-      navigate('/');
+      navigate("/");
     } catch (e) {
       console.log((e as Error).message);
     }
@@ -51,14 +49,14 @@ const UserProvider = ({ children }: { children: React.ReactNode }) => {
   const handleAutoLogin = async () => {
     try {
       // get token from local storage
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem("token");
       if (token) {
         // if token exists, get user data from API
         const userResponse = await getUserByToken(token);
         // set user to state
         setUser(userResponse.user);
         // when page is refreshed, the user is redirected to origin (see ProtectedRoute.tsx)
-        const origin = location.state.from.pathname || '/';
+        const origin = location.state.from.pathname || "/";
         navigate(origin);
       }
     } catch (e) {

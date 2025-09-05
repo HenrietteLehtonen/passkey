@@ -24,7 +24,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@sharedTypes/*": ["../hybrid-types/*"]
+      "@sharedTypes/*": ["../hybrid-types/src/*"]
     }
   },
   "include": ["src"]
