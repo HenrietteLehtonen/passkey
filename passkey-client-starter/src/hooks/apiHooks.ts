@@ -1,7 +1,14 @@
 import fetchData from "@/lib/fetchData";
 import { User } from "@sharedTypes/DBTypes";
 import { LoginResponse, UserResponse } from "@sharedTypes/MessageTypes";
-import { startRegistration } from "@simplewebauthn/browser";
+import {
+  startRegistration,
+  startAuthentication,
+} from "@simplewebauthn/browser";
+import {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+} from "@simplewebauthn/types";
 
 const useUser = () => {
   // network functions for auth server user endpoints
@@ -52,7 +59,7 @@ const usePasskey = () => {
     const registrationResponse = await fetchData<{
       email: string;
       options: PublicKeyCredentialCreationOptionsJSON;
-    }>(import.meta.env.VITE_PASSKEY_API + "auth/setup", options);
+    }>(import.meta.env.VITE_PASSKEY_API + "/auth/setup", options);
 
     // Start registration process
     const attResp = await startRegistration(registrationResponse.options);
@@ -73,16 +80,40 @@ const usePasskey = () => {
 
       body: JSON.stringify(data),
     };
-    return await fetchData<LoginResponse>(
+    return await fetchData<UserResponse>(
       import.meta.env.VITE_PASSKEY_API + "auth/verify",
       verifyOptions
     );
   };
-  // TODO: Define postLogin function
-  const postLogin = async (email) => {
-    // TODO: Fetch login setup options
-    // TODO: Start authentication process
-    // TODO: Fetch and return login verification response
+  // Define postLogin function
+  const postLogin = async (email: string) => {
+    // Fetch login setup options
+    const loginOptions = {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email: email }),
+    };
+    const authenticationResponse =
+      await fetchData<PublicKeyCredentialRequestOptionsJSON>(
+        import.meta.env.VITE_PASSKEY_API + "/auth/login/setup",
+        loginOptions
+      );
+
+    // Start authentication process
+    const attResp = await startAuthentication(authenticationResponse);
+
+    // Fetch and return login verification response
+    const verifyOptions = {
+      ...loginOptions,
+      body: JSON.stringify({ email, authResponse: attResp }),
+    };
+
+    return await fetchData<LoginResponse>(
+      import.meta.env.VITE_PASSKEY_API + "/auth/login/verify",
+      verifyOptions
+    );
   };
 
   return { postUser, postLogin };
