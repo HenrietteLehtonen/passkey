@@ -1,17 +1,33 @@
-import {UserResponse} from '@sharedTypes/MessageTypes';
-import e, {NextFunction, Request, Response} from 'express';
+import {
+  PublicKeyCredentialCreationOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+} from '@simplewebauthn/types';
+import {LoginResponse, UserResponse} from '@sharedTypes/MessageTypes';
+import {NextFunction, Request, Response} from 'express';
 import CustomError from '../../classes/CustomError';
 import {User} from '@sharedTypes/DBTypes';
 import fetchData from '../../utils/fetchData';
 import {
+  generateAuthenticationOptions,
+  GenerateAuthenticationOptionsOpts,
   generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  VerifyAuthenticationResponseOpts,
   verifyRegistrationResponse,
   VerifyRegistrationResponseOpts,
 } from '@simplewebauthn/server';
-import {Challenge, PasskeyUserPost} from '../../types/PasskeyTypes';
+import {
+  Challenge,
+  PasskeyUserGet,
+  PasskeyUserPost,
+} from '../../types/PasskeyTypes';
 import challengeModel from '../models/challengeModel';
+import authenticatorDeviceModel from '../models/authenticatorDeviceModel';
+import {Types} from 'mongoose';
 import passkeyUserModel from '../models/passkeyUserModel';
-import {RegistrationResponseJSON} from '@simplewebauthn/server/script/deps';
+import jwt from 'jsonwebtoken';
 
 // check environment variables
 if (
@@ -131,11 +147,44 @@ const verifyPasskey = async (
       return;
     }
     // Check if device is already registered
+    const {credentialPublicKey, credentialID, counter} = registrationInfo;
+    const existingDevice = await authenticatorDeviceModel.findOne({
+      credentialID,
+    });
+    if (existingDevice) {
+      next(new CustomError('Decive already registered', 400));
+      return;
+    }
+    // Save new authenticator to AuthenticatorDevice collection
+    const newDevice = new authenticatorDeviceModel({
+      email: req.body.email,
+      credentialPublicKey: Buffer.from(credentialPublicKey),
+      credentialID,
+      counter,
+      transports: req.body.registrationOptions.response.transports,
+    });
 
-    // TODO: Save new authenticator to AuthenticatorDevice collection
-    // TODO: Update user devices array in DB
-    // TODO: Clear challenge from DB after successful registration
-    // TODO: Retrieve and send user details from AUTH API
+    const newDeviceResult = await newDevice.save();
+
+    // Update user devices array in DB (eri esim) // findOneAndUpdate
+    const user = await passkeyUserModel.findOne({email: req.body.email});
+    if (!user) {
+      next(new CustomError('User not found', 404));
+      return;
+    }
+    // lisää taulukkoon
+    user.devices.push(newDeviceResult._id as Types.ObjectId);
+    await user.save();
+
+    // Clear challenge from DB after successful registration
+    // - jos ei poista, käyttäjä ei pysty lisäämään uusia laitteita
+    await challengeModel.findByIdAndDelete({email: req.body.email});
+
+    // Retrieve and send user details from AUTH API
+    const userResponse = await fetchData<UserResponse>(
+      AUTH_URL + '/api/v1/users/' + user.userId,
+    );
+    res.json(userResponse);
   } catch (error) {
     next(new CustomError((error as Error).message, 500));
   }
@@ -143,15 +192,45 @@ const verifyPasskey = async (
 
 // Generate authentication options handler
 const authenticationOptions = async (
-  req: Request,
-  res: Response,
+  req: Request<{}, {}, {email: string}>,
+  res: Response<PublicKeyCredentialRequestOptionsJSON>,
   next: NextFunction,
 ) => {
   try {
-    // TODO: Retrieve user and associated devices from DB
-    // TODO: Generate authentication options
-    // TODO: Save challenge to DB
-    // TODO: Send options in response
+    // Retrieve user and associated devices from DB
+    const user = (await passkeyUserModel
+      .findOne({email: req.body.email})
+      .populate('devices')) as unknown as PasskeyUserGet;
+
+    if (!user) {
+      next(new CustomError('User not found', 404));
+      return;
+    }
+
+    // Generate authentication options
+    const aopts: GenerateAuthenticationOptionsOpts = {
+      timeout: 60000,
+      rpID: RP_ID,
+      allowCredentials: user.devices.map((device) => {
+        return {
+          id: device.credentialID,
+          type: 'public-key',
+          transports: device.transports,
+        };
+      }),
+      userVerification: 'preferred',
+    };
+
+    const authOptions = await generateAuthenticationOptions(aopts);
+
+    // Save challenge to DB
+    await challengeModel.create({
+      email: req.body.email,
+      challenge: authOptions.challenge,
+    });
+
+    // Send options in response
+    res.send(authOptions);
   } catch (error) {
     next(new CustomError((error as Error).message, 500));
   }
@@ -159,16 +238,81 @@ const authenticationOptions = async (
 
 // Authentication verification and login handler
 const verifyAuthentication = async (
-  req: Request,
-  res: Response,
+  req: Request<
+    {},
+    {},
+    {email: string; authenticationResponse: AuthenticationResponseJSON}
+  >,
+  res: Response<LoginResponse>,
   next: NextFunction,
 ) => {
   try {
-    // TODO: Retrieve expected challenge from DB
-    // TODO: Verify authentication response
-    // TODO: Update authenticator's counter
-    // TODO: Clear challenge from DB after successful authentication
-    // TODO: Generate and send JWT token
+    // Retrieve expected challenge from DB
+    const eChallenge = await challengeModel.findOne({
+      email: req.body.email,
+    });
+    if (!eChallenge) {
+      next(new CustomError('Challenge not found', 404));
+      return;
+    }
+    // Verify authentication response
+    const user = (await passkeyUserModel
+      .findOne({email: req.body.email})
+      .populate('devices')) as unknown as PasskeyUserGet;
+
+    if (!user) {
+      next(new CustomError('User not found', 404));
+      return;
+    }
+
+    const verifyOptions: VerifyAuthenticationResponseOpts = {
+      expectedRPID: RP_ID,
+      response: req.body.authenticationResponse,
+      expectedChallenge: eChallenge.challenge,
+      expectedOrigin:
+        NODE_ENV === 'development' ? `http://${RP_ID}:5137` : `http://${RP_ID}`,
+      authenticator: {
+        credentialPublicKey: Buffer.from(user.devices[0].credentialPublicKey),
+        credentialID: user.devices[0].credentialID,
+        counter: user.devices[0].counter,
+      },
+      requireUserVerification: false,
+    };
+
+    const verification = await verifyAuthenticationResponse(verifyOptions);
+    const {verified, authenticationInfo} = verification;
+
+    // Update authenticator's counter
+    if (!verified) {
+      await authenticatorDeviceModel.findByIdAndUpdate(user.devices[0]._id, {
+        counter: authenticationInfo.newCounter,
+      });
+    }
+
+    // Clear challenge from DB after successful authentication
+    await challengeModel.findOneAndDelete({email: req.body.email});
+
+    // Generate and send JWT
+    const userResponse = await fetchData<UserResponse>(
+      AUTH_URL + '/api/v1/users/' + user.userId,
+    );
+    if (!userResponse) {
+      next(new CustomError('User not found', 404));
+      return;
+    }
+    const token = jwt.sign(
+      {
+        user_id: userResponse.user.user_id,
+        level_name: userResponse.user.level_name,
+      },
+      JWT_SECRET,
+    );
+    const message: LoginResponse = {
+      message: 'Login successful',
+      user: userResponse.user,
+      token: token,
+    };
+    res.json(message);
   } catch (error) {
     next(new CustomError((error as Error).message, 500));
   }
